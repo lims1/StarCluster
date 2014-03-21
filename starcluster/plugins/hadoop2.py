@@ -36,8 +36,8 @@ core_site_templ = """\
 </property>
 
 <property>
-  <name>fs.default.name</name>
-  <value>hdfs://%(master)s:54310</value>
+  <name>fs.defaultFS</name>
+  <value>hdfs://%(master)s/</value>
   <description>The name of the default file system.  A URI whose
   scheme and authority determine the FileSystem implementation.  The
   uri's scheme determines the config property (fs.SCHEME.impl) naming
@@ -57,8 +57,16 @@ hdfs_site_templ = """\
 <configuration>
 <!-- In: conf/hdfs-site.xml -->
 <property>
-  <name>dfs.permissions</name>
-  <value>false</value>
+  <name>dfs.permissions.superusergroup</name>
+  <value>hadoop</value>
+</property>
+<property>
+  <name>dfs.name.dir</name>
+  <value>%(hadoop_tmpdir)s/name</value>
+</property>
+<property>
+  <name>dfs.data.dir</name>
+  <value>%(hadoop_tmpdir)s/data</value>
 </property>
 <property>
   <name>dfs.replication</name>
@@ -66,6 +74,13 @@ hdfs_site_templ = """\
   <description>Default block replication.
   The actual number of replications can be specified when the file is created.
   The default is used if replication is not specified in create time.
+  </description>
+</property>
+<property>
+  <name>dfs.namenode.http-address</name>
+  <value>%(master)s:50070</value>
+  <description>
+    The address and the base port on which the dfs NameNode Web UI will listen.
   </description>
 </property>
 </configuration>
@@ -80,12 +95,8 @@ mapred_site_templ = """\
 <configuration>
 <!-- In: conf/mapred-site.xml -->
 <property>
-  <name>mapred.job.tracker</name>
-  <value>%(master)s:54311</value>
-  <description>The host and port that the MapReduce job tracker runs
-  at.  If "local", then jobs are run in-process as a single map
-  and reduce task.
-  </description>
+  <name>mapreduce.framework.name</name>
+  <value>yarn</value>
 </property>
 <property>
   <name>mapred.tasktracker.map.tasks.maximum</name>
@@ -95,25 +106,133 @@ mapred_site_templ = """\
   <name>mapred.tasktracker.reduce.tasks.maximum</name>
   <value>%(reduce_tasks_max)d</value>
 </property>
+<property>
+        <name>mapred.child.java.opts</name>
+        <value>-Xmx1024m</value>
+</property>
+<property>
+        <name>mapreduce.task.io.sort.factor</name>
+        <value>50</value>
+</property>
+<property>
+        <name>mapreduce.task.io.sort.mb</name>
+        <value>500</value>
+</property>
+<property>
+        <name>mapreduce.reduce.shuffle.parallelcopies</name>
+        <value>15</value>
+</property>
+<property>
+        <name>mapreduce.jobhistory.address</name>
+        <value>%(master)s:10020</value>
+</property>
+<property>
+        <name>mapreduce.jobhistory.webapp.address</name>
+        <value>%(master)s:19888</value>
+</property>
+
+</configuration>
+"""
+yarn_site_templ = """\
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+
+<!-- Put site-specific property overrides in this file. -->
+
+<configuration>
+<!-- In: conf/yarn-site.xml -->
+  <property>
+    <name>yarn.nodemanager.aux-services</name>
+    <value>mapreduce.shuffle</value>
+  </property>
+
+  <property>
+    <name>yarn.nodemanager.aux-services.mapreduce.shuffle.class</name>
+    <value>org.apache.hadoop.mapred.ShuffleHandler</value>
+  </property>
+
+  <property>
+    <name>yarn.log-aggregation-enable</name>
+    <value>true</value>
+  </property>
+
+  <property>
+    <name>yarn.resourcenameger.address</name>
+    <value>namenode:8032</value>
+  </property>
+  <property>
+    <name>yarn.resourcemanager.scheduler.address</name>
+    <value>namenode:8030</value>
+  </property>
+  <property>
+    <name>yarn.resourcemanager.resource-tracker.address</name>
+    <value>namenode:8031</value>
+  </property>
+  <property>
+    <name>yarn.resourcemanager.admin.address</name>
+    <value>namenode:8033</value>
+  </property>
+  <property>
+    <name>yarn.resourcemanager.webapp.address</name>
+    <value>namenode:8088</value>
+  </property>
+  <property>
+    <description>List of directories to store localized files in.</description>
+    <name>yarn.nodemanager.local-dirs</name>
+    <value>/var/lib/hadoop-yarn/cache/${user.name}/nm-local-dir</value>
+  </property>
+
+  <property>
+    <description>Where to store container logs.</description>
+    <name>yarn.nodemanager.log-dirs</name>
+    <value>/var/log/hadoop-yarn/containers</value>
+  </property>
+
+  <property>
+    <description>Where to aggregate logs to.</description>
+    <name>yarn.nodemanager.remote-app-log-dir</name>
+    <value>/var/log/hadoop-yarn/apps</value>
+  </property>
+
+  <property>
+    <description>Classpath for typical applications.</description>
+     <name>yarn.application.classpath</name>
+     <value>
+        $HADOOP_CONF_DIR,
+        $HADOOP_COMMON_HOME/*,$HADOOP_COMMON_HOME/lib/*,
+        $HADOOP_HDFS_HOME/*,$HADOOP_HDFS_HOME/lib/*,
+        $HADOOP_MAPRED_HOME/*,$HADOOP_MAPRED_HOME/lib/*,
+        $YARN_HOME/*,$YARN_HOME/lib/*
+     </value>
+  </property>
+
+
 </configuration>
 """
 
 
-class Hadoop(clustersetup.ClusterSetup):
+class Hadoop2(clustersetup.ClusterSetup):
     """
     Configures Hadoop using Cloudera packages on StarCluster
     """
 
     def __init__(self, hadoop_tmpdir='/mnt/hadoop', map_to_proc_ratio='1.0',
                  reduce_to_proc_ratio='0.3'):
+        
         self.hadoop_tmpdir = hadoop_tmpdir
         self.hadoop_home = '/usr/lib/hadoop'
-        self.hadoop_conf = '/etc/hadoop-0.20/conf.starcluster'
-        self.empty_conf = '/etc/hadoop-0.20/conf.empty'
+        self.hadoop_conf = '/etc/hadoop/conf.starcluster'
+        self.hdfs_historydir = '/user/history'
+        self.hdfs_logdir='/var/log/hadoop-yarn'
+        self.hdfs_tmpdir = '/tmp'
+        self.empty_conf = '/etc/hadoop/conf.empty'
+        
         self.centos_java_home = '/usr/lib/jvm/java'
         self.centos_alt_cmd = 'alternatives'
         self.ubuntu_javas = ['/usr/lib/jvm/java-6-sun/jre',
                              '/usr/lib/jvm/java-6-openjdk/jre',
+                             '/usr/lib/jvm/java-7-openjdk/jre',
+                             '/usr/lib/jvm/java-7-openjdk-amd64/jre',
                              '/usr/lib/jvm/default-java/jre']
         self.ubuntu_alt_cmd = 'update-alternatives'
         self.map_to_proc_ratio = float(map_to_proc_ratio)
@@ -147,16 +266,16 @@ class Hadoop(clustersetup.ClusterSetup):
     def _install_empty_conf(self, node):
         node.ssh.execute('cp -r %s %s' % (self.empty_conf, self.hadoop_conf))
         alternatives_cmd = self._get_alternatives_cmd(node)
-        cmd = '%s --install /etc/hadoop-0.20/conf ' % alternatives_cmd
-        cmd += 'hadoop-0.20-conf %s 50' % self.hadoop_conf
+        cmd = '%s --install /etc/hadoop/conf ' % alternatives_cmd
+        cmd += 'hadoop-conf %s 50' % self.hadoop_conf
         node.ssh.execute(cmd)
 
     def _configure_env(self, node):
-        env_file_sh = posixpath.join(self.hadoop_conf, 'hadoop-env.sh')
+        env_file_sh = posixpath.join(self.hadoop_conf, 'yarn-env.sh')
         node.ssh.remove_lines_from_file(env_file_sh, 'JAVA_HOME')
         env_file = node.ssh.remote_file(env_file_sh, 'a')
         env_file.write('export JAVA_HOME=%s\n' % self._get_java_home(node))
-        env_file.close()
+        env_file.close()    
 
     def _configure_mapreduce_site(self, node, cfg):
         mapred_site_xml = posixpath.join(self.hadoop_conf, 'mapred-site.xml')
@@ -186,6 +305,12 @@ class Hadoop(clustersetup.ClusterSetup):
         hdfs_site = node.ssh.remote_file(hdfs_site_xml)
         hdfs_site.write(hdfs_site_templ % cfg)
         hdfs_site.close()
+    
+    def _configure_yarn_site(self, node, cfg):
+        yarn_site_xml = posixpath.join(self.hadoop_conf, 'yarn-site.xml')
+        yarn_site = node.ssh.remote_file(yarn_site_xml)
+        yarn_site.write(yarn_site_templ % cfg)
+        yarn_site.close()
 
     def _configure_masters(self, node, master):
         masters_file = posixpath.join(self.hadoop_conf, 'masters')
@@ -208,8 +333,9 @@ class Hadoop(clustersetup.ClusterSetup):
         hdfsdir = posixpath.join(self.hadoop_tmpdir, 'hadoop-hdfs')
         if not node.ssh.isdir(hdfsdir):
             node.ssh.execute("su hdfs -c 'hadoop namenode -format'")
-        self._setup_hadoop_dir(node, hdfsdir, 'hdfs', 'hadoop')
-
+        self._setup_hadoop_dir(node, hdfsdir, 'hdfs', 'hadoop')      
+        
+        
     def _setup_dumbo(self, node):
         if not node.ssh.isfile('/etc/dumbo.conf'):
             f = node.ssh.remote_file('/etc/dumbo.conf')
@@ -224,7 +350,8 @@ class Hadoop(clustersetup.ClusterSetup):
                                  jobid=node.alias)
         self.pool.wait(numtasks=len(nodes))
         node_aliases = map(lambda n: n.alias, nodes)
-        cfg = {'master': master.alias, 'replication': 3,
+        replication_factor=min(3,max(1,len(nodes)/3))
+        cfg = {'master': master.alias, 'replication': replication_factor,
                'hadoop_tmpdir': posixpath.join(self.hadoop_tmpdir,
                                                'hadoop-${user.name}')}
         log.info("Installing configuration templates...")
@@ -235,6 +362,11 @@ class Hadoop(clustersetup.ClusterSetup):
         log.info("Configuring environment...")
         for node in nodes:
             self.pool.simple_job(self._configure_env, (node,),
+                                 jobid=node.alias)
+        self.pool.wait(numtasks=len(nodes))
+        log.info("Configuring YARN Site...")
+        for node in nodes:
+            self.pool.simple_job(self._configure_yarn_site, (node, cfg),
                                  jobid=node.alias)
         self.pool.wait(numtasks=len(nodes))
         log.info("Configuring MapReduce Site...")
@@ -272,36 +404,52 @@ class Hadoop(clustersetup.ClusterSetup):
             self.pool.simple_job(self._setup_dumbo, (node,), jobid=node.alias)
         self.pool.wait(numtasks=len(nodes))
 
+    def _create_hdfs_directories(self, master):
+        self._setup_hdfs_dir(master, self.hdfs_historydir, 'yarn', 'supergroup', permission="1777")
+        self._setup_hdfs_dir(master, self.hdfs_logdir, 'yarn', 'mapred')
+        self._setup_hdfs_dir(master, self.hdfs_tmp, 'hdfs', 'supergroup', permission='1777')
+    
+
     def _setup_hadoop_dir(self, node, path, user, group, permission="775"):
         if not node.ssh.isdir(path):
             node.ssh.mkdir(path)
         node.ssh.execute("chown -R %s:hadoop %s" % (user, path))
         node.ssh.execute("chmod -R %s %s" % (permission, path))
 
+    def _setup_hdfs_dir(self, node, path, user, group, permission="1775"):
+        node.ssh.execute("sudo -u hdfs hadoop fs -mkdir %s" % (path))
+        node.ssh.execute("sudo -u hdfs hadoop fs -chown %s:%s %s" % (user, group, path))
+        node.ssh.execute("sudo -u hdfs hadoop fs -chmod -R %s %s" % (permission, path))
+        
     def _start_datanode(self, node):
-        node.ssh.execute('/etc/init.d/hadoop-0.20-datanode restart')
+        node.ssh.execute('sudo service hadoop-hdfs-datanode restart')
 
-    def _start_tasktracker(self, node):
-        node.ssh.execute('/etc/init.d/hadoop-0.20-tasktracker restart')
+    def _start_nodem(self, node):
+        node.ssh.execute('sudo service hadoop-yarn-nodemanager restart')
 
     def _start_hadoop(self, master, nodes):
-        log.info("Starting namenode...")
-        master.ssh.execute('/etc/init.d/hadoop-0.20-namenode restart')
+        log.info("Starting namdnode in master...")
+        master.ssh.execute('sudo service hadoop-hdfs-namenode restart')
+        master.ssh.execute('sudo chkconfig hadoop-hdfs-namenode on')
         log.info("Starting secondary namenode...")
-        master.ssh.execute('/etc/init.d/hadoop-0.20-secondarynamenode restart')
+        master.ssh.execute('sudo service hadoop-hdfs-secondarynamenode restart')
+        master.ssh.execute('sudo chkconfig hadoop-hdfs-secondarynamenode restart')
         log.info("Starting datanode on all nodes...")
         for node in nodes:
             self.pool.simple_job(self._start_datanode, (node,),
                                  jobid=node.alias)
         self.pool.wait()
-        log.info("Starting jobtracker...")
-        master.ssh.execute('/etc/init.d/hadoop-0.20-jobtracker restart')
-        log.info("Starting tasktracker on all nodes...")
+        self._create_hdfs_directories(master)
+        log.info("Starting resource manager...")
+        
+        master.ssh.execute('sudo service hadoop-yarn-resourcemanager restart')
+        log.info("Starting node manager on all nodes...")
         for node in nodes:
-            self.pool.simple_job(self._start_tasktracker, (node,),
+            self.pool.simple_job(self._start_nodemanager, (node,),
                                  jobid=node.alias)
         self.pool.wait()
-
+        log.info("Starting history server...")
+        master.ssh.execute('sudo service hadoop-mapreduce-historyservers restart')
     def _open_ports(self, master):
         ports = [50070, 50030]
         ec2 = master.ec2

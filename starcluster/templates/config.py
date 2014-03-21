@@ -328,7 +328,7 @@ NODE_INSTANCE_TYPE = m1.small
 #
 # Configure a hadoop cluster. (includes dumbo setup)
 # [plugin hadoop]
-# SETUP_CLASS = starcluster.plugins.hadoop.Hadoop
+# SETUP_CLASS = starcluster.plugins.hadoop2.Hadoop
 #
 # Configure a distributed MySQL Cluster
 # [plugin mysqlcluster]
