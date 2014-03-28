@@ -36,13 +36,17 @@ core_site_templ = """\
 </property>
 
 <property>
-  <name>fs.defaultFS</name>
-  <value>hdfs://%(master)s/</value>
+  <name>fs.default.name</name>
+  <value>hdfs://%(master)s:8020/</value>
   <description>The name of the default file system.  A URI whose
   scheme and authority determine the FileSystem implementation.  The
   uri's scheme determines the config property (fs.SCHEME.impl) naming
   the FileSystem implementation class.  The uri's authority is used to
   determine the host, port, etc. for a filesystem.</description>
+</property>
+<property>
+        <name>io.file.buffer.size</name>
+        <value>131072</value>
 </property>
 
 </configuration>
@@ -57,9 +61,13 @@ hdfs_site_templ = """\
 <configuration>
 <!-- In: conf/hdfs-site.xml -->
 <property>
+        <name>dfs.permissions</name>
+        <value>false</value>
+</property>
+<!-- <property>
   <name>dfs.permissions.superusergroup</name>
   <value>hadoop</value>
-</property>
+</property> -->
 <property>
   <name>dfs.name.dir</name>
   <value>%(hadoop_tmpdir)s/name</value>
@@ -83,6 +91,15 @@ hdfs_site_templ = """\
     The address and the base port on which the dfs NameNode Web UI will listen.
   </description>
 </property>
+<property>
+        <name>dfs.blocksize</name>
+        <value>268435456</value>
+</property>
+<property>
+        <name>dfs.namenode.handler.count</name>
+        <value>100</value>
+</property>
+
 </configuration>
 """
 
@@ -99,11 +116,11 @@ mapred_site_templ = """\
   <value>yarn</value>
 </property>
 <property>
-  <name>mapred.tasktracker.map.tasks.maximum</name>
+  <name>mapreduce.tasktracker.map.tasks.maximum</name>
   <value>%(map_tasks_max)d</value>
 </property>
 <property>
-  <name>mapred.tasktracker.reduce.tasks.maximum</name>
+  <name>mapreduce.tasktracker.reduce.tasks.maximum</name>
   <value>%(reduce_tasks_max)d</value>
 </property>
 <property>
@@ -155,26 +172,29 @@ yarn_site_templ = """\
     <name>yarn.log-aggregation-enable</name>
     <value>true</value>
   </property>
-
   <property>
-    <name>yarn.resourcenameger.address</name>
-    <value>namenode:8032</value>
+    <name>yarn.resourcemanager.hostname</name>
+    <value>%(master)s</value>
+  </property>
+  <property>
+    <name>yarn.resourcemanager.address</name>
+    <value>%(master)s:8032</value>
   </property>
   <property>
     <name>yarn.resourcemanager.scheduler.address</name>
-    <value>namenode:8030</value>
+    <value>%(master)s:8030</value>
   </property>
   <property>
     <name>yarn.resourcemanager.resource-tracker.address</name>
-    <value>namenode:8031</value>
+    <value>%(master)s:8031</value>
   </property>
   <property>
     <name>yarn.resourcemanager.admin.address</name>
-    <value>namenode:8033</value>
+    <value>%(master)s:8033</value>
   </property>
   <property>
     <name>yarn.resourcemanager.webapp.address</name>
-    <value>namenode:8088</value>
+    <value>%(master)s:8088</value>
   </property>
   <property>
     <description>List of directories to store localized files in.</description>
@@ -201,7 +221,7 @@ yarn_site_templ = """\
         $HADOOP_CONF_DIR,
         $HADOOP_COMMON_HOME/*,$HADOOP_COMMON_HOME/lib/*,
         $HADOOP_HDFS_HOME/*,$HADOOP_HDFS_HOME/lib/*,
-        $HADOOP_MAPRED_HOME/*,$HADOOP_MAPRED_HOME/lib/*,
+        /usr/lib/hadoop-mapreduce/*,/usr/lib/hadoop-mapreduce/lib/*,
         $YARN_HOME/*,$YARN_HOME/lib/*
      </value>
   </property>
@@ -237,6 +257,8 @@ class Hadoop2(clustersetup.ClusterSetup):
         self.ubuntu_alt_cmd = 'update-alternatives'
         self.map_to_proc_ratio = float(map_to_proc_ratio)
         self.reduce_to_proc_ratio = float(reduce_to_proc_ratio)
+        self.reduce_to_mem_ratio = 0.25
+        self.map_to_mem_ratio = 1.0
         self._pool = None
 
     @property
@@ -262,6 +284,12 @@ class Hadoop2(clustersetup.ClusterSetup):
 
     def _setup_hadoop_user(self, node, user):
         node.ssh.execute('gpasswd -a %s hadoop' % user)
+    
+    def _setup_sysctl(self,node):
+        node.ssh.execute('sysctl -w net.ipv6.conf.all.disable_ipv6=1')
+        node.ssh.execute('sysctl -w net.ipv6.conf.default.disable_ipv6=1')
+        node.ssh.execute('sysctl -w net.ipv6.conf.lo.disable_ipv6=1')
+        node.ssh.execute('sysctl -w net.core.somaxconn=512')
 
     def _install_empty_conf(self, node):
         node.ssh.execute('cp -r %s %s' % (self.empty_conf, self.hadoop_conf))
@@ -284,10 +312,10 @@ class Hadoop2(clustersetup.ClusterSetup):
         # AWS EMR uses approx 1 map per proc and .3 reduce per proc
         map_tasks_max = max(
             2,
-            int(self.map_to_proc_ratio * node.num_processors))
+            int(self.map_to_mem_ratio * node.memory))
         reduce_tasks_max = max(
             1,
-            int(self.reduce_to_proc_ratio * node.num_processors))
+            int(self.reduce_to_mem_ratio * node.memory))
         cfg.update({
             'map_tasks_max': map_tasks_max,
             'reduce_tasks_max': reduce_tasks_max})
@@ -316,12 +344,15 @@ class Hadoop2(clustersetup.ClusterSetup):
         masters_file = posixpath.join(self.hadoop_conf, 'masters')
         masters_file = node.ssh.remote_file(masters_file)
         masters_file.write(master.alias)
+        masters_file.write('\n')
         masters_file.close()
 
-    def _configure_slaves(self, node, node_aliases):
+    def _configure_slaves(self, node, master, node_aliases):
         slaves_file = posixpath.join(self.hadoop_conf, 'slaves')
         slaves_file = node.ssh.remote_file(slaves_file)
-        slaves_file.write('\n'.join(node_aliases))
+        if node != master:
+            slaves_file.write('\n'.join(node_aliases))
+        slaves_file.write('\n')
         slaves_file.close()
 
     def _setup_hdfs(self, node, user):
@@ -344,6 +375,9 @@ class Hadoop2(clustersetup.ClusterSetup):
 
     def _configure_hadoop(self, master, nodes, user):
         log.info("Configuring Hadoop...")
+        log.info("Setting up kernel parameters...")
+        for node in nodes:
+            self.pool.simple_job(self._setup_sysctl, node, jobid=node.alias)
         log.info("Adding user %s to hadoop group" % user)
         for node in nodes:
             self.pool.simple_job(self._setup_hadoop_user, (node, user),
@@ -359,10 +393,10 @@ class Hadoop2(clustersetup.ClusterSetup):
             self.pool.simple_job(self._install_empty_conf, (node,),
                                  jobid=node.alias)
         self.pool.wait(numtasks=len(nodes))
-        log.info("Configuring environment...")
-        for node in nodes:
-            self.pool.simple_job(self._configure_env, (node,),
-                                 jobid=node.alias)
+        #log.info("Configuring environment...")
+#        for node in nodes:
+#self.pool.simple_job(self._configure_env, (node,),
+                                 #jobid=node.alias)
         self.pool.wait(numtasks=len(nodes))
         log.info("Configuring YARN Site...")
         for node in nodes:
@@ -391,7 +425,7 @@ class Hadoop2(clustersetup.ClusterSetup):
         self.pool.wait(numtasks=len(nodes))
         log.info("Configuring slaves file...")
         for node in nodes:
-            self.pool.simple_job(self._configure_slaves, (node, node_aliases),
+            self.pool.simple_job(self._configure_slaves, (node, master, node_aliases),
                                  jobid=node.alias)
         self.pool.wait(numtasks=len(nodes))
         log.info("Configuring HDFS...")
@@ -407,8 +441,7 @@ class Hadoop2(clustersetup.ClusterSetup):
     def _create_hdfs_directories(self, master):
         self._setup_hdfs_dir(master, self.hdfs_historydir, 'yarn', 'supergroup', permission="1777")
         self._setup_hdfs_dir(master, self.hdfs_logdir, 'yarn', 'mapred')
-        self._setup_hdfs_dir(master, self.hdfs_tmp, 'hdfs', 'supergroup', permission='1777')
-    
+        
 
     def _setup_hadoop_dir(self, node, path, user, group, permission="775"):
         if not node.ssh.isdir(path):
@@ -417,39 +450,39 @@ class Hadoop2(clustersetup.ClusterSetup):
         node.ssh.execute("chmod -R %s %s" % (permission, path))
 
     def _setup_hdfs_dir(self, node, path, user, group, permission="1775"):
-        node.ssh.execute("sudo -u hdfs hadoop fs -mkdir %s" % (path))
-        node.ssh.execute("sudo -u hdfs hadoop fs -chown %s:%s %s" % (user, group, path))
-        node.ssh.execute("sudo -u hdfs hadoop fs -chmod -R %s %s" % (permission, path))
+        node.ssh.execute("su hdfs -c 'hadoop fs -mkdir %s'" % (path))
+        node.ssh.execute("su hdfs -c 'hadoop fs -chown %s:%s %s'" % (user, group, path))
+        node.ssh.execute("su hdfs -c 'hadoop fs -chmod -R %s %s'" % (permission, path))
         
     def _start_datanode(self, node):
         node.ssh.execute('sudo service hadoop-hdfs-datanode restart')
 
-    def _start_nodem(self, node):
+    def _start_nodemanager(self, node):
         node.ssh.execute('sudo service hadoop-yarn-nodemanager restart')
 
     def _start_hadoop(self, master, nodes):
         log.info("Starting namdnode in master...")
         master.ssh.execute('sudo service hadoop-hdfs-namenode restart')
-        master.ssh.execute('sudo chkconfig hadoop-hdfs-namenode on')
-        log.info("Starting secondary namenode...")
+        log.info("Starting secondary namenode in master...")
         master.ssh.execute('sudo service hadoop-hdfs-secondarynamenode restart')
-        master.ssh.execute('sudo chkconfig hadoop-hdfs-secondarynamenode restart')
-        log.info("Starting datanode on all nodes...")
+        log.info("Starting datanode on all, but master, nodes...")
         for node in nodes:
-            self.pool.simple_job(self._start_datanode, (node,),
+            if node != master:
+                self.pool.simple_job(self._start_datanode, (node,),
                                  jobid=node.alias)
         self.pool.wait()
-        self._create_hdfs_directories(master)
-        log.info("Starting resource manager...")
+ #       self._create_hdfs_directories(master)
+        log.info("Starting resource manager in master...")
         
         master.ssh.execute('sudo service hadoop-yarn-resourcemanager restart')
-        log.info("Starting node manager on all nodes...")
+        log.info("Starting node manager on all, but master, nodes...")
         for node in nodes:
-            self.pool.simple_job(self._start_nodemanager, (node,),
+            if node != master:
+                self.pool.simple_job(self._start_nodemanager, (node,),
                                  jobid=node.alias)
         self.pool.wait()
-        log.info("Starting history server...")
-        master.ssh.execute('sudo service hadoop-mapreduce-historyservers restart')
+        log.info("Starting history server in master...")
+        master.ssh.execute('sudo service hadoop-mapreduce-historyserver restart')
     def _open_ports(self, master):
         ports = [50070, 50030]
         ec2 = master.ec2
