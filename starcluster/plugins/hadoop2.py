@@ -199,19 +199,19 @@ yarn_site_templ = """\
   <property>
     <description>List of directories to store localized files in.</description>
     <name>yarn.nodemanager.local-dirs</name>
-    <value>/var/lib/hadoop-yarn/cache/${user.name}/nm-local-dir</value>
+    <value>%(hadoop_tmpdir)s/hadoop-yarn/cache/${user.name}/nm-local-dir</value>
   </property>
 
   <property>
     <description>Where to store container logs.</description>
     <name>yarn.nodemanager.log-dirs</name>
-    <value>/var/log/hadoop-yarn/containers</value>
+    <value>%(hadoop_tmpdir)s/hadoop-yarn/log/containers</value>
   </property>
 
   <property>
     <description>Where to aggregate logs to.</description>
     <name>yarn.nodemanager.remote-app-log-dir</name>
-    <value>/var/log/hadoop-yarn/apps</value>
+    <value>%(hadoop_tmpdir)s/hadoop-yarn/log/apps</value>
   </property>
 
   <property>
@@ -356,12 +356,22 @@ class Hadoop2(clustersetup.ClusterSetup):
         slaves_file.close()
 
     def _setup_hdfs(self, node, user):
+        
+        node.ssh.execute("umount /mnt")
+        node.ssh.execute("ls /dev/xvda[a-z] | xargs pvcreate")
+        node.ssh.execute("pvscan | awk '{if(NF==5){print $2}}' | xargs vgcreate vg")
+        node.ssh.execute("lvcreate -i $(pvscan | awk '/Total/{print $2}') -n lv -l100%VG vg")
+        node.ssh.execute("mkfs.ext4 /dev/vg/lv")
+        node.ssh.execute("mount -t ext4 -o noatime /dev/vg/lv /mnt")
+        
         self._setup_hadoop_dir(node, self.hadoop_tmpdir, 'hdfs', 'hadoop')
         mapred_dir = posixpath.join(self.hadoop_tmpdir, 'hadoop-mapred')
         self._setup_hadoop_dir(node, mapred_dir, 'mapred', 'hadoop')
         userdir = posixpath.join(self.hadoop_tmpdir, 'hadoop-%s' % user)
         self._setup_hadoop_dir(node, userdir, user, 'hadoop')
         hdfsdir = posixpath.join(self.hadoop_tmpdir, 'hadoop-hdfs')
+        self._setup_hadoop_dir(node, userdir, user, 'hadoop')
+        hdfsdir = posixpath.join(self.hadoop_tmpdir, 'hadoop-yarn')
         if not node.ssh.isdir(hdfsdir):
             node.ssh.execute("su hdfs -c 'hadoop namenode -format'")
         self._setup_hadoop_dir(node, hdfsdir, 'hdfs', 'hadoop')      
@@ -444,8 +454,10 @@ class Hadoop2(clustersetup.ClusterSetup):
         
 
     def _setup_hadoop_dir(self, node, path, user, group, permission="775"):
+        
         if not node.ssh.isdir(path):
             node.ssh.mkdir(path)
+            
         node.ssh.execute("chown -R %s:hadoop %s" % (user, path))
         node.ssh.execute("chmod -R %s %s" % (permission, path))
 
