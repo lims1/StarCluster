@@ -48,7 +48,15 @@ core_site_templ = """\
         <name>io.file.buffer.size</name>
         <value>131072</value>
 </property>
+<property>
+    <name>hadoop.proxyuser.mapred.groups</name>
+    <value>*</value>
+</property>
 
+<property>
+    <name>hadoop.proxyuser.mapred.hosts</name>
+    <value>*</value>
+</property>
 </configuration>
 """
 
@@ -61,19 +69,15 @@ hdfs_site_templ = """\
 <configuration>
 <!-- In: conf/hdfs-site.xml -->
 <property>
-        <name>dfs.permissions</name>
-        <value>false</value>
-</property>
-<!-- <property>
   <name>dfs.permissions.superusergroup</name>
   <value>hadoop</value>
-</property> -->
+</property> 
 <property>
-  <name>dfs.name.dir</name>
+  <name>dfs.namenode.name.dir</name>
   <value>%(hadoop_tmpdir)s/name</value>
 </property>
 <property>
-  <name>dfs.data.dir</name>
+  <name>dfs.datanode.data.dir</name>
   <value>%(hadoop_tmpdir)s/data</value>
 </property>
 <property>
@@ -116,6 +120,11 @@ mapred_site_templ = """\
   <value>yarn</value>
 </property>
 <property>
+  <name>yarn.app.mapreduce.am.staging-dir</name>
+  <value>/user</value>
+</property>
+<!--
+<property>
   <name>mapreduce.tasktracker.map.tasks.maximum</name>
   <value>%(map_tasks_max)d</value>
 </property>
@@ -123,10 +132,24 @@ mapred_site_templ = """\
   <name>mapreduce.tasktracker.reduce.tasks.maximum</name>
   <value>%(reduce_tasks_max)d</value>
 </property>
+-->
 <property>
-        <name>mapred.child.java.opts</name>
+        <name>mapreduce.map.memory.mb</name>
+        <value>1536</value>
+</property>
+<property>
+        <name>mapreduce.map.java.opts</name>
         <value>-Xmx1024m</value>
 </property>
+<property>
+        <name>mapreduce.reduce.memory.mb</name>
+        <value>3072</value>
+</property>
+<property>
+        <name>mapreduce.reduce.java.opts</name>
+        <value>-Xmx2560m</value>
+</property>
+
 <property>
         <name>mapreduce.task.io.sort.factor</name>
         <value>50</value>
@@ -158,19 +181,32 @@ yarn_site_templ = """\
 
 <configuration>
 <!-- In: conf/yarn-site.xml -->
+<!--
+  <property>
+    <name>yarn.resourcemanager.scheduler.class</name>
+    <value>org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler</value>
+  </property>
+-->
   <property>
     <name>yarn.nodemanager.aux-services</name>
-    <value>mapreduce.shuffle</value>
+    <value>mapreduce_shuffle</value>
   </property>
 
   <property>
     <name>yarn.nodemanager.aux-services.mapreduce.shuffle.class</name>
     <value>org.apache.hadoop.mapred.ShuffleHandler</value>
   </property>
-
+  <property>
+    <name>yarn.nodemanager.resource.memory-mb</name>
+    <value>%(nodemanager_memory)d</value>
+  </property>
+  <property>
+    <name>yarn.scheduler.minimum-allocation-mb</name>
+    <value>%(scheduler_min_memory)d</value>
+  </property>
   <property>
     <name>yarn.log-aggregation-enable</name>
-    <value>true</value>
+    <value>false</value>
   </property>
   <property>
     <name>yarn.resourcemanager.hostname</name>
@@ -199,30 +235,30 @@ yarn_site_templ = """\
   <property>
     <description>List of directories to store localized files in.</description>
     <name>yarn.nodemanager.local-dirs</name>
-    <value>%(hadoop_tmpdir)s/hadoop-yarn/cache/${user.name}/nm-local-dir</value>
+    <value>file://%(hadoop_tmpdir)s/local-dir</value>
   </property>
 
   <property>
     <description>Where to store container logs.</description>
     <name>yarn.nodemanager.log-dirs</name>
-    <value>%(hadoop_tmpdir)s/hadoop-yarn/log/containers</value>
+    <value>file://%(hadoop_tmpdir)s/log</value>
   </property>
-
+<!--
   <property>
     <description>Where to aggregate logs to.</description>
     <name>yarn.nodemanager.remote-app-log-dir</name>
-    <value>%(hadoop_tmpdir)s/hadoop-yarn/log/apps</value>
+    <value>hdfs://var/log/hadoop-yarn/apps</value>
   </property>
-
+-->
   <property>
     <description>Classpath for typical applications.</description>
      <name>yarn.application.classpath</name>
      <value>
-        $HADOOP_CONF_DIR,
+        /etc/hadoop/conf,
         $HADOOP_COMMON_HOME/*,$HADOOP_COMMON_HOME/lib/*,
         $HADOOP_HDFS_HOME/*,$HADOOP_HDFS_HOME/lib/*,
         /usr/lib/hadoop-mapreduce/*,/usr/lib/hadoop-mapreduce/lib/*,
-        $YARN_HOME/*,$YARN_HOME/lib/*
+        /usr/lib/hadoop-yarn/*,/usr/lib/hadoop-yarn/lib/*
      </value>
   </property>
 
@@ -257,8 +293,8 @@ class Hadoop2(clustersetup.ClusterSetup):
         self.ubuntu_alt_cmd = 'update-alternatives'
         self.map_to_proc_ratio = float(map_to_proc_ratio)
         self.reduce_to_proc_ratio = float(reduce_to_proc_ratio)
-        self.reduce_to_mem_ratio = 0.25
-        self.map_to_mem_ratio = 1.0
+        self.map_to_mem_ratio = 0.5
+        self.reduce_to_mem_ratio = 0.15
         self._pool = None
 
     @property
@@ -336,6 +372,12 @@ class Hadoop2(clustersetup.ClusterSetup):
     
     def _configure_yarn_site(self, node, cfg):
         yarn_site_xml = posixpath.join(self.hadoop_conf, 'yarn-site.xml')
+        nodemanager_memory=min(node.memory*0.8, int(node.memory-1024*4))
+        
+        cfg.update({'nodemanager_memory': nodemanager_memory,
+                    'scheduler_min_memory':512})
+        
+        
         yarn_site = node.ssh.remote_file(yarn_site_xml)
         yarn_site.write(yarn_site_templ % cfg)
         yarn_site.close()
@@ -350,11 +392,11 @@ class Hadoop2(clustersetup.ClusterSetup):
     def _configure_slaves(self, node, master, node_aliases):
         slaves_file = posixpath.join(self.hadoop_conf, 'slaves')
         slaves_file = node.ssh.remote_file(slaves_file)
-        if node != master:
-            slaves_file.write('\n'.join(node_aliases))
+        slaves_file.write('\n'.join(node_aliases))
         slaves_file.write('\n')
         slaves_file.close()
 
+    
     def _setup_hdfs(self, node, user):
         
         node.ssh.execute("umount /mnt")
@@ -375,7 +417,10 @@ class Hadoop2(clustersetup.ClusterSetup):
         if not node.ssh.isdir(hdfsdir):
             node.ssh.execute("su hdfs -c 'hadoop namenode -format'")
         self._setup_hadoop_dir(node, hdfsdir, 'hdfs', 'hadoop')      
-        
+        logdir = posixpath.join(self.hadoop_tmpdir, 'log')
+        self._setup_hadoop_dir(node, logdir, 'yarn', 'yarn', permission="755")
+        localdir = posixpath.join(self.hadoop_tmpdir, 'local')
+        self._setup_hadoop_dir(node, localdir, 'yarn', 'yarn', permission="755")
         
     def _setup_dumbo(self, node):
         if not node.ssh.isfile('/etc/dumbo.conf'):
@@ -449,7 +494,7 @@ class Hadoop2(clustersetup.ClusterSetup):
         self.pool.wait(numtasks=len(nodes))
 
     def _create_hdfs_directories(self, master):
-        self._setup_hdfs_dir(master, self.hdfs_historydir, 'yarn', 'supergroup', permission="1777")
+        self._setup_hdfs_dir(master, self.hdfs_historydir, 'yarn', 'hadoop', permission="1777")
         self._setup_hdfs_dir(master, self.hdfs_logdir, 'yarn', 'mapred')
         
 
@@ -462,7 +507,7 @@ class Hadoop2(clustersetup.ClusterSetup):
         node.ssh.execute("chmod -R %s %s" % (permission, path))
 
     def _setup_hdfs_dir(self, node, path, user, group, permission="1775"):
-        node.ssh.execute("su hdfs -c 'hadoop fs -mkdir %s'" % (path))
+        node.ssh.execute("su hdfs -c 'hadoop fs -mkdir -p %s'" % (path))
         node.ssh.execute("su hdfs -c 'hadoop fs -chown %s:%s %s'" % (user, group, path))
         node.ssh.execute("su hdfs -c 'hadoop fs -chmod -R %s %s'" % (permission, path))
         
@@ -483,7 +528,7 @@ class Hadoop2(clustersetup.ClusterSetup):
                 self.pool.simple_job(self._start_datanode, (node,),
                                  jobid=node.alias)
         self.pool.wait()
- #       self._create_hdfs_directories(master)
+        self._create_hdfs_directories(master)
         log.info("Starting resource manager in master...")
         
         master.ssh.execute('sudo service hadoop-yarn-resourcemanager restart')
