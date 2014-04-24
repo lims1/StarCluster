@@ -278,6 +278,7 @@ class Hadoop2(clustersetup.ClusterSetup):
         self.hadoop_tmpdir = hadoop_tmpdir
         self.hadoop_home = '/usr/lib/hadoop'
         self.hadoop_conf = '/etc/hadoop/conf.starcluster'
+        self.spark_conf = '/etc/spark/conf'
         self.hdfs_historydir = '/user/history'
         self.hdfs_logdir='/var/log/hadoop-yarn'
         self.hdfs_tmpdir = '/tmp'
@@ -340,6 +341,7 @@ class Hadoop2(clustersetup.ClusterSetup):
         env_file = node.ssh.remote_file(env_file_sh, 'a')
         env_file.write('export JAVA_HOME=%s\n' % self._get_java_home(node))
         env_file.close()    
+
 
     def _configure_mapreduce_site(self, node, cfg):
         mapred_site_xml = posixpath.join(self.hadoop_conf, 'mapred-site.xml')
@@ -493,6 +495,40 @@ class Hadoop2(clustersetup.ClusterSetup):
             self.pool.simple_job(self._setup_dumbo, (node,), jobid=node.alias)
         self.pool.wait(numtasks=len(nodes))
 
+    def _configure_spark_env(self, node):
+        env_file_sh = posixpath.join(self.spark_conf, 'spark-env.sh')
+        node.ssh.remove_lines_from_file(env_file_sh, 'STANDALONE_SPARK_MASTER_HOST=')
+        env_file = node.ssh.remote_file(env_file_sh, 'a')
+        env_file.write('export STANDALONE_SPARK_MASTER_HOST=master\n')
+        env_file.write('export SPARK_HOME=/usr/lib/spark\n')
+    
+        env_file.close()
+        
+
+    def _configure_spark_slaves(self, node, master, node_aliases):
+        slaves_file = posixpath.join(self.spark_conf, 'slaves')
+        slaves_file = node.ssh.remote_file(slaves_file)
+        slaves_file.write('\n'.join(node_aliases))
+        slaves_file.write('\n')
+        slaves_file.close()
+    
+    def _configure_spark(self, master, nodes, user):
+        log.info("Configuring Spark...")
+        
+        node_aliases = map(lambda n: n.alias, nodes)
+        
+        log.info("Configuring environment...")
+        for node in nodes:
+            self.pool.simple_job(self._configure_spark_env, (node,),
+                                 jobid=node.alias)
+        self.pool.wait(numtasks=len(nodes))
+
+        log.info("Configuring slaves file...")
+        for node in nodes:
+            self.pool.simple_job(self._configure_spark_slaves, (node, master, node_aliases),
+                                 jobid=node.alias)
+        self.pool.wait(numtasks=len(nodes))
+
     def _create_hdfs_directories(self, master):
         self._setup_hdfs_dir(master, self.hdfs_historydir, 'yarn', 'hadoop', permission="1777")
         self._setup_hdfs_dir(master, self.hdfs_logdir, 'yarn', 'mapred')
@@ -513,7 +549,7 @@ class Hadoop2(clustersetup.ClusterSetup):
         
     def _start_datanode(self, node):
         node.ssh.execute('sudo service hadoop-hdfs-datanode restart')
-
+        
     def _start_nodemanager(self, node):
         node.ssh.execute('sudo service hadoop-yarn-nodemanager restart')
 
@@ -540,6 +576,23 @@ class Hadoop2(clustersetup.ClusterSetup):
         self.pool.wait()
         log.info("Starting history server in master...")
         master.ssh.execute('sudo service hadoop-mapreduce-historyserver restart')
+
+    def _start_spark_worker(self, node):
+        node.ssh.execute('sudo service spark-master stop')
+        node.ssh.execute('sudo service spark-worker restart')
+    
+    def _start_spark(self,master,nodes):
+        log.info("Starting spark-master in master...")
+        master.ssh.execute('sudo service spark-master restart')
+        log.info("Starting spark-worker on all, but master, nodes...")
+        for node in nodes:
+            if node != master:
+                self.pool.simple_job(self._start_spark_worker, (node,),
+                                 jobid=node.alias)
+                
+        self.pool.wait()
+
+        
     def _open_ports(self, master):
         ports = [50070, 50030]
         ec2 = master.ec2
@@ -557,6 +610,8 @@ class Hadoop2(clustersetup.ClusterSetup):
     def run(self, nodes, master, user, user_shell, volumes):
         self._configure_hadoop(master, nodes, user)
         self._start_hadoop(master, nodes)
+        self._configure_spark(master, nodes, user)
+        self._start_spark(master,nodes)
         self._open_ports(master)
         log.info("Job tracker status: http://%s:50030" % master.dns_name)
         log.info("Namenode status: http://%s:50070" % master.dns_name)
